@@ -1,0 +1,74 @@
+# Example configuration for obsidian_graph_colorizer
+#
+# IMPORTANT:
+# - This tool only writes scalar string properties.
+# - Hex colors should be written as STRINGS. If they include '#', they MUST be quoted in YAML.
+#
+# To use:
+#   cp config.example.yaml config.yaml
+#   python -m obsidian_graph_colorizer --vault "/path/to/YourVault" --config config.yaml sync
+
+vault_path: null  # optional; can be provided via --vault
+
+ignore_globs:
+  - ".obsidian/**"
+  - ".trash/**"
+  - ".git/**"
+  - "node_modules/**"
+
+auto_properties:
+  graph_color:
+    default: "#808080"   # gray
+    rules:
+      - name: Meetings folder
+        value: "#ffb000"
+        match:
+          path_glob: ["Meetings/**"]
+
+      - name: Meeting tag
+        value: "#ffb000"
+        match:
+          tags_any: ["meeting"]
+
+      - name: Has open tasks
+        value: "#d62728"
+        match:
+          # Use single quotes for regex to avoid YAML escape issues
+          regex: ['(?m)^- \[ \] ']
+
+      - name: Projects folder
+        value: "#1f77b4"
+        match:
+          path_glob: ["Projects/**"]
+
+      - name: People folder
+        value: "#9467bd"
+        match:
+          path_glob: ["People/**"]
+
+  # Example of a SECOND auto-generated property.
+  # This one sets a simple "kind" based on folders.
+  kind:
+    default: "note"
+    rules:
+      - name: Meetings -> kind=meeting
+        value: "meeting"
+        match:
+          path_glob: ["Meetings/**"]
+      - name: Projects -> kind=project
+        value: "project"
+        match:
+          path_glob: ["Projects/**"]
+
+graph:
+  enable: true
+  property_name: "graph_color"
+  graph_json_relpath: ".obsidian/graph.json"
+
+  # Obsidian property search syntax is:
+  #   [property:value]
+  # Values can be quoted for exact matching.
+  query_template: "[{prop}:{value_expr}]"
+
+  alpha: 1.0
+  prune_unused_groups: false
