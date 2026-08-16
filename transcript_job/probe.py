@@ -1,74 +1,52 @@
-import json
+import html
+import re
+import urllib.parse
 import requests
 
-VID = "7lQTfrOTROo"
-clients = [
-    (
-        "web",
-        {
-            "clientName": "WEB",
-            "clientVersion": "2.20231219.04.00",
-            "hl": "en",
-            "gl": "US",
-        },
-        "com.google.android.youtube/2.20231219.04.00",
-    ),
-    (
-        "android",
-        {
-            "clientName": "ANDROID",
-            "clientVersion": "20.10.38",
-            "androidSdkVersion": 32,
-            "osName": "Android",
-            "osVersion": "12",
-            "hl": "en",
-            "gl": "US",
-        },
-        "com.google.android.youtube/20.10.38 (Linux; U; Android 12) gzip",
-    ),
-    (
-        "ios",
-        {
-            "clientName": "IOS",
-            "clientVersion": "20.10.4",
-            "deviceMake": "Apple",
-            "deviceModel": "iPhone16,2",
-            "osName": "iPhone",
-            "osVersion": "18.3.2.22D82",
-            "hl": "en",
-            "gl": "US",
-        },
-        "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)",
-    ),
+SITES = [
+    "https://tubealfred.com/tools/youtube-metadata-viewer",
+    "https://yttools.co/youtube-video-info-tool",
+    "https://www.ytinfo.online/",
+    "https://www.ytdataviewer.com/",
 ]
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136 Safari/537.36"
+s = requests.Session(); s.headers.update({"User-Agent": UA})
 
-for name, client, ua in clients:
-    body = {
-        "context": {"client": client},
-        "videoId": VID,
-        "contentCheckOk": True,
-        "racyCheckOk": True,
-    }
+
+def interesting(text: str):
+    found = set()
+    patterns = [
+        r'https?://[^"\'`\\\s<>]+',
+        r'(?<![A-Za-z0-9_])/(?:api|v1|v2)/[^"\'`\\\s<>]+',
+        r'fetch\((.{0,300})',
+        r'axios\.(?:get|post)\((.{0,300})',
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, text, re.I | re.S):
+            value = m.group(0).replace("\\u0026", "&")
+            low = value.lower()
+            if any(x in low for x in ("youtube", "metadata", "video", "api", "fetch")):
+                found.add(value[:500])
+    return sorted(found)
+
+for page in SITES:
     try:
-        r = requests.post(
-            "https://www.youtube.com/youtubei/v1/player",
-            json=body,
-            headers={
-                "User-Agent": ua,
-                "Content-Type": "application/json",
-                "X-YouTube-Client-Name": client["clientName"],
-                "X-YouTube-Client-Version": client["clientVersion"],
-            },
-            timeout=30,
-        )
-        print("\n===", name, r.status_code, r.headers.get("content-type"), len(r.content), "===")
-        try:
-            data = r.json()
-            print("playability", json.dumps(data.get("playabilityStatus"), ensure_ascii=False)[:1500])
-            print("videoDetails", json.dumps(data.get("videoDetails"), ensure_ascii=False)[:2000])
-            print("microformat", json.dumps(data.get("microformat"), ensure_ascii=False)[:2000])
-            print("captions_keys", list((data.get("captions") or {}).keys()))
-        except Exception:
-            print(r.text[:3000])
+        r = s.get(page, timeout=30); r.raise_for_status(); source = r.text
+        print("\n### PAGE", page, r.status_code, len(source), r.headers.get("content-type"))
+        print("forms", re.findall(r'<form[^>]*action=["\']([^"\']+)', source, re.I)[:20])
+        print("inline", *interesting(source)[:80], sep="\n")
+        scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)', source, re.I)
+        print("scripts", len(scripts))
+        base = f"{urllib.parse.urlparse(page).scheme}://{urllib.parse.urlparse(page).netloc}"
+        for src in scripts:
+            url = urllib.parse.urljoin(base, html.unescape(src))
+            try:
+                js = s.get(url, timeout=30).text
+            except Exception:
+                continue
+            hits = interesting(js)
+            if hits:
+                print("\nSCRIPT", url, len(js))
+                print(*hits[:120], sep="\n")
     except Exception as exc:
-        print("\n===", name, "ERROR", type(exc).__name__, str(exc), "===")
+        print("\n### ERROR", page, type(exc).__name__, exc)
