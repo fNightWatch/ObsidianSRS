@@ -1,0 +1,47 @@
+name: transcript-publish-v2
+
+on:
+  push:
+    branches:
+      - transcript-build-20260816
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    if: ${{ !contains(github.event.head_commit.message, '[skip transcript]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade requests
+      - run: python transcript_job/proxy_collect_v2.py --input transcript_job/videos.tsv --output gleb_solomin_transcripts_v2 --workers 8
+      - run: |
+          cat gleb_solomin_transcripts_v2/stats.txt
+          head -150 gleb_solomin_transcripts_v2/errors.tsv
+          test "$(find gleb_solomin_transcripts_v2/ru -name '*.txt' | wc -l)" = "139"
+          test "$(find gleb_solomin_transcripts_v2/en -name '*.txt' | wc -l)" = "8"
+      - run: zip -qr transcript_job/gleb_solomin_transcripts_result_v2.zip gleb_solomin_transcripts_v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gleb-solomin-transcripts-v2
+          path: transcript_job/gleb_solomin_transcripts_result_v2.zip
+          retention-days: 7
+      - name: publish result
+        run: |
+          cp gleb_solomin_transcripts_v2/stats.txt transcript_job/result_v2_stats.txt
+          cp gleb_solomin_transcripts_v2/errors.tsv transcript_job/result_v2_errors.tsv
+          git config user.name transcript-build
+          git config user.email actions@users.noreply.github.com
+          git add -f transcript_job/gleb_solomin_transcripts_result_v2.zip transcript_job/result_v2_stats.txt transcript_job/result_v2_errors.tsv
+          git commit -m "Store transcript result v2 [skip transcript]"
+          git push
