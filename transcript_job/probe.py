@@ -1,29 +1,24 @@
 import re
 import requests
 
-VID = "7lQTfrOTROo"
-keys = [
-    ("youtube_web_public", "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"),
-]
-
-for name, key in keys:
-    try:
-        r = requests.get(
-            "https://www.googleapis.com/youtube/v3/videos",
-            params={
-                "part": "snippet,statistics,contentDetails",
-                "id": VID,
-                "key": key,
-            },
-            timeout=30,
-        )
-        print("\n===", name, r.status_code, len(r.content), "===")
-        print(r.text[:5000])
-    except Exception as exc:
-        print(name, type(exc).__name__, exc)
-
-url = "https://www.ytdataviewer.com/_astro/VideoDataViewer.astro_astro_type_script_index_0_lang.B0qetQFI.js"
-r = requests.get(url, timeout=30)
-print("\n=== ytdataviewer_js", r.status_code, len(r.content), "===")
-for key in sorted(set(re.findall(r"AIza[0-9A-Za-z_-]{30,}", r.text))):
-    print("public_browser_key", key)
+page_url = "https://www.ytdataviewer.com/"
+js_url = "https://www.ytdataviewer.com/_astro/VideoDataViewer.astro_astro_type_script_index_0_lang.B0qetQFI.js"
+for name, url in (("PAGE", page_url), ("JS", js_url)):
+    r = requests.get(url, timeout=30); r.raise_for_status(); text = r.text
+    print("\n===", name, len(text), "===")
+    needles = ["googleapis.com/youtube/v3/videos", "apiKey", "api-key", "api_key", "youtubeApi", "YOUTUBE_API", "data-key", "key="]
+    shown = set()
+    for needle in needles:
+        pos = 0
+        while True:
+            pos = text.find(needle, pos)
+            if pos < 0: break
+            chunk = text[max(0, pos-3000):min(len(text), pos+3000)]
+            if chunk not in shown:
+                print("\n---", needle, "at", pos, "---\n", chunk)
+                shown.add(chunk)
+            pos += len(needle)
+    print("candidate strings")
+    for value in sorted(set(re.findall(r'[A-Za-z0-9_-]{30,80}', text))):
+        if value.startswith(("AIza", "ABCD", "youtube")) or "key" in value.lower():
+            print(value)
