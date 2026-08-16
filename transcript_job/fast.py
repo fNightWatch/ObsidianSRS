@@ -1,0 +1,10 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collect
+
+collect.ytdlp_info = lambda video_id: {}
+
+if __name__ == "__main__":
+    raise SystemExit(collect.main())
