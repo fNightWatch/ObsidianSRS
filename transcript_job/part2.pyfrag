@@ -1,0 +1,269 @@
+    out = []
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            vid = clean(row.get("video_id")) or video_id(clean(row.get("url")))
+            if not vid: continue
+            out.append(Video(clean(row.get("channel")) or "other", int(row.get("order") or len(out)+1), vid, clean(row.get("source_title"))))
+    return validate(out)
+
+
+def validate(items: list[Video]) -> list[Video]:
+    if not items: raise ValueError("no videos")
+    ids = [x.video_id for x in items]
+    if len(ids) != len(set(ids)): raise ValueError("duplicate video id")
+    if any(not VIDEO_ID_RE.fullmatch(x) for x in ids): raise ValueError("invalid video id")
+    return items
+
+
+def built_in() -> list[Video]:
+    return validate([Video("ru", i+1, v) for i, v in enumerate(RU_IDS)] + [Video("en", i+1, v) for i, v in enumerate(EN_IDS)])
+
+
+def dedupe(parts: Iterable[Segment]) -> list[Segment]:
+    out: list[Segment] = []
+    for p in sorted(parts, key=lambda x: x.start):
+        p.text = clean(p.text)
+        if not p.text: continue
+        if out and p.text.casefold() == out[-1].text.casefold(): continue
+        if out and p.start - out[-1].start <= 10 and p.text.casefold().startswith(out[-1].text.casefold()):
+            p.start = out[-1].start; out[-1] = p; continue
+        out.append(p)
+    return out
+
+
+def tactiq(vid: str, lang: str) -> tuple[list[Segment], str]:
+    codes = [lang] + (["ru-RU"] if lang == "ru" else ["en-US", "en-GB"])
+    errors = []
+    for code in codes:
+        try:
+            r = http().post(TACTIQ_URL,
+                json={"langCode": code, "videoUrl": f"https://www.youtube.com/watch?v={vid}"},
+                headers={"Content-Type": "application/json", "Origin": "https://tactiq.io", "Referer": "https://tactiq.io/"}, timeout=50)
+            r.raise_for_status(); data = r.json()
+            captions = data.get("captions") if isinstance(data, dict) else data
+            parts = dedupe(Segment(float(x.get("start") or x.get("offset") or 0),
+                                   float(x.get("dur") or x.get("duration") or 0), x.get("text") or "")
+                           for x in (captions or []) if isinstance(x, dict))
+            if parts: return parts, code
+            errors.append(f"{code}:empty")
+        except Exception as e: errors.append(f"{code}:{type(e).__name__}:{e}")
+        time.sleep(.4 + random.random()*.4)
+    raise RuntimeError("; ".join(errors))
+
+
+def yta(vid: str, lang: str) -> tuple[list[Segment], str]:
+    api = YouTubeTranscriptApi(); codes = [lang] + (["ru-RU"] if lang == "ru" else ["en-US", "en-GB"])
+    try:
+        got = api.fetch(vid, languages=codes)
+        parts = dedupe(Segment(float(getattr(x, "start", x.get("start", 0) if isinstance(x, dict) else 0)),
+                               float(getattr(x, "duration", x.get("duration", 0) if isinstance(x, dict) else 0)),
+                               getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "")) for x in got)
+        if parts: return parts, clean(getattr(got, "language_code", lang)) or lang
+    except Exception: pass
+    tracks = list(api.list(vid))
+    tracks.sort(key=lambda x: (0 if str(x.language_code).startswith(lang) else 1, 0 if not x.is_generated else 1))
+    for track in tracks:
+        if not str(track.language_code).startswith(lang): continue
+        got = track.fetch(); parts = dedupe(Segment(float(x.start), float(x.duration), x.text) for x in got)
+        if parts: return parts, str(track.language_code)
+    raise RuntimeError("no matching transcript")
+
+
+def json3(data: dict[str, Any]) -> list[Segment]:
+    return dedupe(Segment(float(e.get("tStartMs") or 0)/1000,
+                          float(e.get("dDurationMs") or 0)/1000,
+                          "".join(str(x.get("utf8") or "") for x in e.get("segs") or []))
+                  for e in data.get("events") or [])
+
+
+def vtt(text: str) -> list[Segment]:
+    def sec(s: str) -> float:
+        xs = s.replace(",", ".").split(":"); return sum(float(x)*(60**i) for i, x in enumerate(reversed(xs)))
+    out = []
+    for block in re.split(r"\n\s*\n", text.replace("\r", "")):
+        lines = [x.strip() for x in block.splitlines() if x.strip()]
+        timing = next((x for x in lines if "-->" in x), "")
+        if not timing: continue
+        a,b = [x.strip().split()[0] for x in timing.split("-->",1)]
+        body = " ".join(x for x in lines if x != timing and not x.isdigit() and not x.startswith(("WEBVTT","NOTE","Kind:","Language:")))
+        out.append(Segment(sec(a), max(0,sec(b)-sec(a)), body))
+    return dedupe(out)
+
+
+def ytdlp_info(vid: str) -> dict[str, Any]:
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "ignore_no_formats_error": True,
+            "socket_timeout": 45, "retries": 4, "extractor_retries": 4, "cachedir": False,
+            "extractor_args": {"youtube": {"player_client": ["android_vr", "web_safari", "web"]}}}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
+
+
+def info_captions(info: dict[str, Any], lang: str) -> tuple[list[Segment], str]:
+    choices = []
+    for source_rank, group in enumerate((info.get("subtitles") or {}, info.get("automatic_captions") or {})):
+        for code, formats in group.items():
+            rank = 0 if code == lang else 1 if str(code).startswith(lang) else 9
+            if rank < 9:
+                for fmt in formats or []: choices.append((rank, source_rank, 0 if fmt.get("ext") == "json3" else 1, str(code), fmt))
+    for _,_,_,code,fmt in sorted(choices, key=lambda x:x[:3]):
+        try:
+            r = http().get(fmt["url"], timeout=50); r.raise_for_status()
+            parts = json3(r.json()) if fmt.get("ext") == "json3" or r.text.lstrip().startswith("{") else vtt(r.text)
+            if parts: return parts, code
+        except Exception: pass
+    raise RuntimeError("no caption URL")
+
+
+def timedtext(vid: str, lang: str) -> tuple[list[Segment], str]:
+    for code in [lang] + (["ru-RU"] if lang == "ru" else ["en-US", "en-GB"]):
+        for kind in ("asr", ""):
+            try:
+                params = {"v": vid, "lang": code, "fmt": "json3"}
+                if kind: params["kind"] = kind
+                r = http().get("https://www.youtube.com/api/timedtext", params=params, timeout=40); r.raise_for_status()
+                if r.content:
+                    parts = json3(r.json())
+                    if parts: return parts, code
+            except Exception: pass
+    raise RuntimeError("no timedtext")
+
+
+def page_meta(vid: str) -> tuple[str, int|None, str]:
+    s = http(); url = f"https://www.youtube.com/watch?v={vid}"
+    title = ""; views = None; published = ""
+    try:
+        r = s.get("https://www.youtube.com/oembed", params={"url":url,"format":"json"}, timeout=30)
+        if r.ok: title = clean(r.json().get("title"))
+    except Exception: pass
+    try:
+        r = s.get(url, params={"hl":"en","gl":"US"}, timeout=50); r.raise_for_status(); t = r.text
+        if not title:
+            m = re.search(r'<meta name="title" content="([^"]+)"', t); title = clean(m.group(1)) if m else ""
+        m = re.search(r'"viewCount":"(\d+)"', t)
+        if m: views = int(m.group(1))
+        for p in (r'"publishDate":"(\d{4}-\d{2}-\d{2})"', r'"uploadDate":"(\d{4}-\d{2}-\d{2})"', r'<meta itemprop="datePublished" content="(\d{4}-\d{2}-\d{2})"'):
+            m = re.search(p,t)
+            if m: published=m.group(1); break
+    except Exception: pass
+    return title, views, published
+
+
+def ryd_views(vid: str) -> int|None:
+    try:
+        r=http().get("https://returnyoutubedislikeapi.com/votes",params={"videoId":vid},timeout=30); r.raise_for_status(); v=r.json().get("viewCount")
+        return int(v) if v is not None else None
+    except Exception: return None
+
+
+def alt_meta(vid: str) -> tuple[str,int|None,str]:
+    endpoints = [
+        "https://pipedapi.kavin.rocks/streams/", "https://pipedapi.adminforge.de/streams/",
+        "https://pipedapi.reallyaweso.me/streams/", "https://yewtu.be/api/v1/videos/",
+        "https://inv.nadeko.net/api/v1/videos/", "https://invidious.nerdvpn.de/api/v1/videos/"
+    ]
+    for base in endpoints:
+        try:
+            r=http().get(base+vid,timeout=35); r.raise_for_status(); d=r.json()
+            title=clean(d.get("title")); views=d.get("views",d.get("viewCount")); views=int(views) if views is not None else None
+            published=clean(d.get("uploadDate"))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}",published):
+                ts=d.get("uploaded",d.get("published"))
+                if ts:
+                    ts=float(ts); ts=ts/1000 if ts>10_000_000_000 else ts
+                    published=datetime.fromtimestamp(ts,timezone.utc).date().isoformat()
+                else: published=""
+            if title or views is not None or published: return title,views,published
+        except Exception: pass
+    return "",None,""
+
+
+def metadata(info: dict[str, Any], video: Video) -> tuple[str,int|None,str]:
+    title=clean(info.get("title") or info.get("fulltitle")) or video.source_title
+    views=info.get("view_count"); views=int(views) if views is not None else None
+    raw=clean(info.get("upload_date") or info.get("release_date")); published=f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if re.fullmatch(r"\d{8}",raw) else ""
+    if not (title and views is not None and published):
+        t,v,p=page_meta(video.video_id); title=title or t; views=views if views is not None else v; published=published or p
+    if views is None: views=ryd_views(video.video_id)
+    if not (title and views is not None and published):
+        t,v,p=alt_meta(video.video_id); title=title or t; views=views if views is not None else v; published=published or p
+    return title,views,published
+
+
+def collect(video: Video) -> Record:
+    errors=[]; info={}
+    for n in range(3):
+        try: info=ytdlp_info(video.video_id); break
+        except Exception as e: errors.append(f"yt-dlp:{type(e).__name__}:{e}"); time.sleep(1.5*(2**n)+random.random())
+    title,views,published=metadata(info,video)
+    segments=None; language=""; source=""
+    for name,fn in (("tactiq",lambda:tactiq(video.video_id,video.channel)),
+                    ("youtube-transcript-api",lambda:yta(video.video_id,video.channel)),
+                    ("yt-dlp-caption",lambda:info_captions(info,video.channel)),
+                    ("youtube-timedtext",lambda:timedtext(video.video_id,video.channel))):
+        try:
+            segments,language=fn(); source=name; break
+        except Exception as e: errors.append(f"{name}:{type(e).__name__}:{e}")
+    return Record(video,title,views,published,language,source,segments,errors)
+
+
+def stamp(value: float) -> str:
+    n=max(0,int(value)); return f"{n//3600:02d}:{n%3600//60:02d}:{n%60:02d}"
+
+
+def status(r: Record) -> str:
+    return "ok" if r.title and r.views is not None and r.published and r.segments else "error"
+
+
+def record_text(r: Record) -> str:
+    lines=[f"channel: {r.video.channel}",f"order: {r.video.order}",f"video_id: {r.video.video_id}",
+           f"url: https://www.youtube.com/watch?v={r.video.video_id}",f"title: {r.title}",
+           f"views: {'' if r.views is None else r.views}",f"views_as_of: {AS_OF}",f"published: {r.published}",
+           f"transcript_language: {r.transcript_language}",f"transcript_source: {r.transcript_source}",f"status: {status(r)}"]
+    if status(r)!="ok": lines.append("error: "+clean(" | ".join(r.errors or [])))
+    lines.append(""); lines.extend(f"[{stamp(x.start)}] {x.text}" for x in r.segments or [])
+    return "\n".join(lines).rstrip()+"\n"
+
+
+def write(records: list[Record], root: Path) -> None:
+    if root.exists(): shutil.rmtree(root)
+    (root/"ru").mkdir(parents=True); (root/"en").mkdir(parents=True)
+    index=["channel\torder\tvideo_id\turl\ttitle\tviews\tviews_as_of\tpublished\ttranscript_language\ttranscript_source\tstatus\tfile"]
+    errors=["channel\torder\tvideo_id\terror"]; combined={"ru":[],"en":[]}
+    for r in sorted(records,key=lambda x:(x.video.channel!="ru",x.video.order)):
+        rel=f"{r.video.channel}/{r.video.order:03d}_{r.video.video_id}.txt"; body=record_text(r); (root/rel).write_text(body,encoding="utf-8"); combined[r.video.channel].append(body.rstrip())
+        vals=[r.video.channel,str(r.video.order),r.video.video_id,f"https://www.youtube.com/watch?v={r.video.video_id}",r.title,
+              "" if r.views is None else str(r.views),AS_OF,r.published,r.transcript_language,r.transcript_source,status(r),rel]
+        index.append("\t".join(clean(x) for x in vals))
+        if status(r)!="ok": errors.append("\t".join([r.video.channel,str(r.video.order),r.video.video_id,clean(" | ".join(r.errors or []))]))
+    (root/"index.tsv").write_text("\n".join(index)+"\n",encoding="utf-8")
+    (root/"errors.tsv").write_text("\n".join(errors)+"\n",encoding="utf-8")
+    (root/"all_ru.txt").write_text("\n\n".join(combined["ru"])+"\n",encoding="utf-8")
+    (root/"all_en.txt").write_text("\n\n".join(combined["en"])+"\n",encoding="utf-8")
+    stats={"total":len(records),"ru":sum(r.video.channel=="ru" for r in records),"en":sum(r.video.channel=="en" for r in records),
+           "complete":sum(status(r)=="ok" for r in records),"transcripts":sum(bool(r.segments) for r in records),
+           "metadata_complete":sum(bool(r.title and r.views is not None and r.published) for r in records),"errors":sum(status(r)!="ok" for r in records),"views_as_of":AS_OF}
+    (root/"stats.txt").write_text("\n".join(f"{k}: {v}" for k,v in stats.items())+"\n",encoding="utf-8")
+    shutil.copy2(__file__,root/"collect.py")
+
+
+def main() -> int:
+    p=argparse.ArgumentParser(); p.add_argument("--input",type=Path); p.add_argument("--output",type=Path,default=Path("gleb_solomin_transcripts")); p.add_argument("--workers",type=int,default=4); p.add_argument("--limit",type=int,default=0); a=p.parse_args()
+    videos=read_xlsx(a.input) if a.input and a.input.suffix.lower()==".xlsx" else read_tsv(a.input) if a.input else built_in()
+    if len(videos)!=147 and not a.limit: raise ValueError(f"video count {len(videos)} != 147")
+    if a.limit: videos=videos[:a.limit]
+    records=[]
+    with cf.ThreadPoolExecutor(max_workers=max(1,a.workers)) as pool:
+        futures={pool.submit(collect,v):v for v in videos}
+        for n,f in enumerate(cf.as_completed(futures),1):
+            v=futures[f]
+            try:r=f.result()
+            except Exception as e:r=Record(v,errors=[f"fatal:{type(e).__name__}:{e}"])
+            records.append(r); print(f"{n}/{len(videos)} {v.channel}:{v.order} {v.video_id} {status(r)}",flush=True)
+    failed=[r for r in records if status(r)!="ok"]
+    if failed:
+        print(f"retrying {len(failed)} incomplete",flush=True)
+        repl={r.video.video_id:collect(r.video) for r in failed}; records=[repl.get(r.video.video_id,r) for r in records]
+    write(records,a.output)
+    return 0
+
+if __name__=="__main__": raise SystemExit(main())

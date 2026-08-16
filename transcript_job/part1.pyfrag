@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import csv
+import html
+import json
+import random
+import re
+import shutil
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+import requests
+import yt_dlp
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from youtube_transcript_api import YouTubeTranscriptApi
+
+AS_OF = "2026-08-16"
+TACTIQ_URL = "https://tactiq-apps-prod.tactiq.io/transcript"
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+XML_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+RU_IDS = [
+"7lQTfrOTROo","mPtfW2CEKvk","c6lndNFsi0k","m1T37LErJws","MRszWm0D4GM","lH0UXDopsB8","7YLLXkHrrUM","W-3ZOqm-Ozk","tElqc9M2Ouk","LF5O3sTKcOE","QFTq22wZxNo","IP2NxQMG2CY","xuUPVO6octQ","92icN6M9N94","HnKn-eOgQQA","OBEPshDa7DA","naeM8R3Pcrs","zG0ur1t700Y","jvsyWUu3hIk","7T1h62vJxHQ","spczLnou3-4","HkQXQ79eZOY","EnTXXyKSL64","xEkkuTe34wI","OgNl3jFQc0A","zmCAdIXVQgM","wuhxDAAvWRg","TjVQvhEA_JE","NwsXaBucCbQ","Y8WzNeP1yYk","c-CWUbbbcI8","XrojxMPetIs","oemNf96Q3Go","4DB7fBunzDA","OldZAnef-4Q","p0Ri2tNb-6I","5_neZdoB3n0","xof8p4GyQjw","1bQgq20ssxo","0vyNFQmampw","RBM2RIvW8Ug","6aFdBSVjS_g","yx6KlzW_iEc","zk6m4Pk0Jh4","wB-39dpXTiQ","KJVbBipnwR0","8tfkW9Vh3wY","ULM7GRWXk-0","ja1M9PZ0v_E","RNAmaHPy1iI","WWJuH_1X6ZE","Zes0nI9Z30k","Ymp1YhtEkjI","9BsA7f7xsJ4","JXCkvM3JPbs","FLaud-GQ_nQ","TU3CGNvYVTU","cyvzOKNhoD4","7x8--QHuJr0","6q1l2uv3kyw","hlfjUaCugXw","FlcUXVWx0aM","M-MRb8KzgIQ","4ejuz0rzpDo","RaIW1Zt308E","uSU2HU_FtdA","5b5stZq98Ls","vVeV8igAG5M","TGHtckxfgnE","9Tn5xAWlZ74","M2v07gQZBKk","zUj46YmBrYs","_unljosAuag","CHDFQVww-0Q","4xdwu5WYsLY","qew-oGNWdw8","ZFQsEs0jR1I","_f_frFVInq0","7v7a6nAJ2go","0U46t3juWD0","UL6l_VDJz_c","-xhJpFKvYhY","enoU828pKeg","pkh5DvkoZd4","IRSRNarrl4o","0qpfXkAJ3xw","R1MhrECGvws","ntgDyLwo2pk","34TEP7__7e4","jQ9SzJ1ZMrw","ovvpq0Wkch0","HDeaP7RdghA","D66oy9XA4YA","seVE_9inRE0","kM9uCs7Asho","ckuK-oFhuzQ","D6nujlUIIk0","Zuzd3HPsBE0","48ofAxeQWKE","6ilPHOk1yHI","-kSUFSQ2uyA","ThA5fLubZC8","pIpYiFjmaaA","-VroH6Qg5F0","8WLZX7ovnv0","kC29JUGYj2E","LdEeSplUCys","zMcuZKa6g2Q","5EChkvL7Rsw","ckY4YahSj_E","nZG1wFLyFxs","eouUz_uPcBs","GapVI8zM9tY","-5STvqqPqGg","EkcVJRipg8o","JSgsCXtJC_s","U90-vTojU3I","ddc1gg7DpUU","99p7m3mcEUE","hULO-EBsn4M","Bv9sdYnWHg0","ndScd5BjnP4","K0JnqyzyY24","MtJbrfeKkdY","Oqt6TWvaeew","QAjhoAshunU","K5utaRTQaIY","wJ6bIzuKHQ0","_c84uQCcls8","-oHdqG4iXpw","W4pX20IYFGc","pd4h9RCPzmY","uQSzijYu1Cs","V6h1oWWFYGU","6dYyoRFCu74","C1VFt8zvjek","SAhDjHZLUsw","lBjpEnIHb1s","JK1KAqvhCno"
+]
+EN_IDS = ["QHeoHn8cWko","AoQalV3g77U","E8_kJaveoUQ","xmrW0ALXiD4","KXk-CJ75PQE","LzVgczQtC7I","moJKeFLiP5o","id6CcT-HOTo"]
+
+@dataclass(frozen=True)
+class Video:
+    channel: str
+    order: int
+    video_id: str
+    source_title: str = ""
+
+@dataclass
+class Segment:
+    start: float
+    duration: float
+    text: str
+
+@dataclass
+class Record:
+    video: Video
+    title: str = ""
+    views: int | None = None
+    published: str = ""
+    transcript_language: str = ""
+    transcript_source: str = ""
+    segments: list[Segment] | None = None
+    errors: list[str] | None = None
+
+
+def http() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(total=4, connect=4, read=4, status=4, backoff_factor=1.0,
+                  status_forcelist=(408, 429, 500, 502, 503, 504),
+                  allowed_methods=frozenset({"GET", "POST"}))
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=12, pool_maxsize=12)
+    s.mount("http://", adapter); s.mount("https://", adapter)
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+        "Cookie": "CONSENT=YES+cb",
+    })
+    return s
+
+
+def clean(value: Any) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", "", text).replace("\u200b", " ").replace("\ufeff", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def video_id(value: str) -> str | None:
+    value = value.strip()
+    if VIDEO_ID_RE.fullmatch(value): return value
+    try: p = urllib.parse.urlparse(value)
+    except ValueError: return None
+    q = urllib.parse.parse_qs(p.query).get("v", [None])[0]
+    if q and VIDEO_ID_RE.fullmatch(q): return q
+    for part in reversed([x for x in p.path.split("/") if x]):
+        if VIDEO_ID_RE.fullmatch(part): return part
+    return None
+
+
+def read_xlsx(path: Path) -> list[Video]:
+    with zipfile.ZipFile(path) as z:
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        relmap = {x.attrib["Id"]: x.attrib["Target"] for x in rels}
+        out: list[Video] = []
+        for sheet in wb.findall(".//x:sheet", XML_NS):
+            name = sheet.attrib.get("name", "").casefold()
+            channel = "ru" if "рус" in name or "russian" in name else "en" if "english" in name or "англ" in name else "other"
+            target = relmap[sheet.attrib[REL_ID]].lstrip("/")
+            if target not in z.namelist(): target = "xl/" + target.lstrip("xl/")
+            root = ET.fromstring(z.read(target)); order = 0
+            for row in root.findall(".//x:sheetData/x:row", XML_NS):
+                n = int(row.attrib.get("r", "0")); cell = row.find(f"x:c[@r='A{n}']", XML_NS)
+                if n <= 1 or cell is None: continue
+                f = cell.find("x:f", XML_NS); formula = f.text if f is not None and f.text else ""
+                quoted = [x.replace('""', '"') for x in re.findall(r'"((?:""|[^"])*)"', formula)]
+                vid = video_id(quoted[0]) if quoted else None
+                if not vid: continue
+                order += 1
+                title = quoted[1] if len(quoted) > 1 else ""
+                out.append(Video(channel, order, vid, clean(title)))
+    return validate(out)
+
+
+def read_tsv(path: Path) -> list[Video]:
