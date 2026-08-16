@@ -1,0 +1,74 @@
+: dict[str, Metadata]) -> Record:
+    metadata = metadata_map.get(video.video_id, Metadata())
+    errors: list[str] = []
+    if not metadata.title:
+        metadata.title = fallback_title(video)
+        if metadata.title:
+            metadata.source = metadata.source or "youtube_oembed"
+    if metadata.views is None:
+        metadata.views = fallback_views(video.video_id)
+        if metadata.views is not None:
+            metadata.source = metadata.source or "return_youtube_dislike"
+    transcript, transcript_errors = fetch_transcript(video)
+    errors.extend(transcript_errors)
+    return Record(video=video, metadata=metadata, transcript=transcript, errors=errors)
+
+
+def timestamp(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
+def record_status(record: Record) -> str:
+    metadata = record.metadata
+    transcript_chars = sum(len(segment.text) for segment in record.transcript.segments)
+    complete = (
+        bool(metadata.title)
+        and metadata.views is not None
+        and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", metadata.published))
+        and transcript_chars >= 100
+    )
+    return "ok" if complete else "error"
+
+
+def record_text(record: Record) -> str:
+    metadata = record.metadata
+    transcript = record.transcript
+    lines = [
+        f"channel: {record.video.channel}",
+        f"order: {record.video.order}",
+        f"video_id: {record.video.video_id}",
+        f"url: {record.video.url}",
+        f"title: {metadata.title}",
+        f"views: {'' if metadata.views is None else metadata.views}",
+        f"views_as_of: {AS_OF}",
+        f"published: {metadata.published}",
+        f"metadata_source: {metadata.source}",
+        f"transcript_language: {transcript.language}",
+        f"transcript_language_name: {transcript.language_name}",
+        f"transcript_auto_generated: {'' if transcript.auto_generated is None else str(transcript.auto_generated).lower()}",
+        f"transcript_source: {transcript.source}",
+        f"transcript_source_url: {SUMMYNEWS_PAGE}?v={record.video.video_id}",
+        f"status: {record_status(record)}",
+    ]
+    if record_status(record) != "ok":
+        missing = []
+        if not metadata.title:
+            missing.append("title")
+        if metadata.views is None:
+            missing.append("views")
+        if not metadata.published:
+            missing.append("published")
+        if not transcript.segments:
+            missing.append("transcript")
+        lines.append(f"missing: {','.join(missing)}")
+        lines.append("error: " + clean(" | ".join(record.errors)))
+    lines.extend(["", "transcript:"])
+    lines.extend(f"[{timestamp(segment.start)}] {segment.text}" for segment in transcript.segments)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_output(records: list[Record], output: Path, source_list: Path) -> None:
+    if output.exists():
+        shutil.rmtree(output)
+    (output / "ru").mkdir(parents=True)

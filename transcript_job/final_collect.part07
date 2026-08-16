@@ -1,0 +1,18 @@
+)}"],
+                )
+            records.append(record)
+            chars = sum(len(segment.text) for segment in record.transcript.segments)
+            print(
+                f"{completed}/{len(videos)} {video.channel}:{video.order} {video.video_id} "
+                f"{record_status(record)} segments={len(record.transcript.segments)} chars={chars}",
+                flush=True,
+            )
+
+    write_output(records, args.output, args.input)
+    if not args.allow_incomplete:
+        validate_output(records, videos, args.output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,69 @@
+    (output / "en").mkdir(parents=True)
+
+    index_rows = [
+        "channel\torder\tvideo_id\turl\ttitle\tviews\tviews_as_of\tpublished\tmetadata_source\t"
+        "transcript_language\ttranscript_auto_generated\ttranscript_source\tstatus\tfile"
+    ]
+    error_rows = ["channel\torder\tvideo_id\tmissing\terror"]
+    combined: dict[str, list[str]] = {"ru": [], "en": []}
+
+    for record in sorted(records, key=lambda x: (x.video.channel != "ru", x.video.order)):
+        relative = f"{record.video.channel}/{record.video.order:03d}_{record.video.video_id}.txt"
+        body = record_text(record)
+        (output / relative).write_text(body, encoding="utf-8")
+        combined[record.video.channel].append(body.rstrip())
+
+        metadata = record.metadata
+        transcript = record.transcript
+        values = [
+            record.video.channel,
+            str(record.video.order),
+            record.video.video_id,
+            record.video.url,
+            metadata.title,
+            "" if metadata.views is None else str(metadata.views),
+            AS_OF,
+            metadata.published,
+            metadata.source,
+            transcript.language,
+            "" if transcript.auto_generated is None else str(transcript.auto_generated).lower(),
+            transcript.source,
+            record_status(record),
+            relative,
+        ]
+        index_rows.append("\t".join(clean(value) for value in values))
+
+        if record_status(record) != "ok":
+            missing = []
+            if not metadata.title:
+                missing.append("title")
+            if metadata.views is None:
+                missing.append("views")
+            if not metadata.published:
+                missing.append("published")
+            if not transcript.segments:
+                missing.append("transcript")
+            error_rows.append("\t".join([
+                record.video.channel,
+                str(record.video.order),
+                record.video.video_id,
+                ",".join(missing),
+                clean(" | ".join(record.errors)),
+            ]))
+
+    (output / "index.tsv").write_text("\n".join(index_rows) + "\n", encoding="utf-8")
+    (output / "errors.tsv").write_text("\n".join(error_rows) + "\n", encoding="utf-8")
+    (output / "all_ru.txt").write_text("\n\n".join(combined["ru"]) + "\n", encoding="utf-8")
+    (output / "all_en.txt").write_text("\n\n".join(combined["en"]) + "\n", encoding="utf-8")
+
+    stats = {
+        "total": len(records),
+        "ru": sum(record.video.channel == "ru" for record in records),
+        "en": sum(record.video.channel == "en" for record in records),
+        "complete": sum(record_status(record) == "ok" for record in records),
+        "transcripts": sum(bool(record.transcript.segments) for record in records),
+        "metadata_complete": sum(
+            bool(record.metadata.title and record.metadata.views is not None and record.metadata.published)
+            for record in records
+        ),
+        "errors": sum(reco

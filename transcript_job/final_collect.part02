@@ -1,0 +1,84 @@
+Video]) -> list[Video]:
+    if not videos:
+        raise ValueError("No videos found")
+    ids = [video.video_id for video in videos]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate video IDs found")
+    if any(not VIDEO_ID_RE.fullmatch(video_id) for video_id in ids):
+        raise ValueError("Invalid video ID found")
+    channels = {video.channel for video in videos}
+    if not channels.issubset({"ru", "en"}):
+        raise ValueError(f"Unknown channels: {sorted(channels - {'ru', 'en'})}")
+    return videos
+
+
+def batches(items: list[str], size: int) -> Iterable[list[str]]:
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def discover_youtube_api_key(s: requests.Session) -> str:
+    env_key = clean(__import__("os").environ.get("YOUTUBE_API_KEY", ""))
+    if env_key:
+        return env_key
+    response = s.get(YTDATAVIEWER_PAGE, timeout=45)
+    response.raise_for_status()
+    match = re.search(r'window\.YOUTUBE_API_KEY\s*=\s*"([^"]+)"', response.text)
+    if not match:
+        match = re.search(r'const\s+API_KEY\s*=\s*"([^"]+)"', response.text)
+    if not match:
+        raise RuntimeError("YouTube Data API browser key was not found")
+    return match.group(1)
+
+
+def fetch_metadata(videos: list[Video]) -> dict[str, Metadata]:
+    s = session()
+    api_key = discover_youtube_api_key(s)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": YTDATAVIEWER_PAGE,
+        "Origin": "https://www.ytdataviewer.com",
+    }
+    result: dict[str, Metadata] = {}
+    for group in batches([video.video_id for video in videos], 50):
+        response = s.get(
+            YOUTUBE_DATA_API,
+            params={
+                "part": "snippet,statistics",
+                "id": ",".join(group),
+                "key": api_key,
+            },
+            headers=headers,
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for item in payload.get("items") or []:
+            video_id = clean(item.get("id"))
+            snippet = item.get("snippet") or {}
+            statistics = item.get("statistics") or {}
+            published_at = clean(snippet.get("publishedAt"))
+            views_raw = statistics.get("viewCount")
+            result[video_id] = Metadata(
+                title=clean(snippet.get("title")),
+                views=int(views_raw) if views_raw is not None else None,
+                published=published_at[:10] if re.match(r"\d{4}-\d{2}-\d{2}", published_at) else "",
+                source="youtube_data_api",
+            )
+    return result
+
+
+def fallback_title(video: Video) -> str:
+    try:
+        response = session(2).get(
+            "https://www.youtube.com/oembed",
+            params={"url": video.url, "format": "json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return clean(response.json().get("title"))
+    except Exception:
+        return video.source_title
+
+
+def fallback_views(video_id:

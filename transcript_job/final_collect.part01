@@ -1,0 +1,68 @@
+eturn part
+    return None
+
+
+def read_tsv(path: Path) -> list[Video]:
+    videos: list[Video] = []
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"channel", "order", "video_id", "url"}
+        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            raise ValueError("TSV columns are incomplete")
+        for row in reader:
+            video_id = extract_video_id(row.get("video_id", "")) or extract_video_id(row.get("url", ""))
+            if not video_id:
+                continue
+            videos.append(Video(
+                channel=clean(row.get("channel", "")),
+                order=int(row.get("order") or len(videos) + 1),
+                video_id=video_id,
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                source_title=clean(row.get("source_title", "")),
+            ))
+    return validate_videos(videos)
+
+
+def read_xlsx(path: Path) -> list[Video]:
+    with zipfile.ZipFile(path) as archive:
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        relmap = {node.attrib["Id"]: node.attrib["Target"] for node in rels}
+        videos: list[Video] = []
+        for sheet in workbook.findall(".//x:sheet", XLSX_NS):
+            name = sheet.attrib.get("name", "").casefold()
+            if "рус" in name or "russian" in name:
+                channel = "ru"
+            elif "english" in name or "англ" in name:
+                channel = "en"
+            else:
+                continue
+            target = relmap[sheet.attrib[REL_ID]].lstrip("/")
+            if target not in archive.namelist():
+                target = "xl/" + target.lstrip("xl/")
+            root = ET.fromstring(archive.read(target))
+            order = 0
+            for row in root.findall(".//x:sheetData/x:row", XLSX_NS):
+                row_number = int(row.attrib.get("r", "0"))
+                cell = row.find(f"x:c[@r='A{row_number}']", XLSX_NS)
+                if row_number <= 1 or cell is None:
+                    continue
+                formula_node = cell.find("x:f", XLSX_NS)
+                formula = formula_node.text if formula_node is not None and formula_node.text else ""
+                quoted = [x.replace('""', '"') for x in re.findall(r'"((?:""|[^"])*)"', formula)]
+                video_id = extract_video_id(quoted[0]) if quoted else None
+                if not video_id:
+                    continue
+                order += 1
+                title = clean(quoted[1]) if len(quoted) > 1 else ""
+                videos.append(Video(
+                    channel=channel,
+                    order=order,
+                    video_id=video_id,
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    source_title=title,
+                ))
+    return validate_videos(videos)
+
+
+def validate_videos(videos: list[

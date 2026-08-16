@@ -1,0 +1,78 @@
+ str) -> int | None:
+    try:
+        response = session(2).get(
+            "https://returnyoutubedislikeapi.com/votes",
+            params={"videoId": video_id},
+            timeout=30,
+        )
+        response.raise_for_status()
+        value = response.json().get("viewCount")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def normalize_segments(raw_segments: Any) -> list[Segment]:
+    if not isinstance(raw_segments, list):
+        return []
+    segments: list[Segment] = []
+    for raw in raw_segments:
+        if not isinstance(raw, dict):
+            continue
+        text = clean(raw.get("text"))
+        if not text:
+            continue
+        try:
+            start = max(0.0, float(raw.get("start") or 0))
+            duration = max(0.0, float(raw.get("duration") or raw.get("dur") or 0))
+        except (TypeError, ValueError):
+            continue
+        segments.append(Segment(start=start, duration=duration, text=text))
+    return segments
+
+
+def fetch_transcript_once(video: Video, language: str | None) -> Transcript:
+    params: dict[str, str] = {"v": video.video_id, "format": "json"}
+    if language:
+        params["lang"] = language
+    response = session(3).get(SUMMYNEWS_API, params=params, timeout=150)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Transcript response is not an object")
+    if payload.get("error"):
+        raise RuntimeError(clean(payload.get("error")))
+    segments = normalize_segments(payload.get("transcript"))
+    if not segments:
+        raise RuntimeError("Transcript is empty")
+    returned_id = clean(payload.get("video_id"))
+    if returned_id and returned_id != video.video_id:
+        raise RuntimeError(f"Transcript video ID mismatch: {returned_id}")
+    return Transcript(
+        language=clean(payload.get("language")) or language or video.channel,
+        language_name=clean(payload.get("language_name")),
+        auto_generated=payload.get("is_auto_generated") if isinstance(payload.get("is_auto_generated"), bool) else None,
+        source="summynews",
+        segments=segments,
+    )
+
+
+def fetch_transcript(video: Video) -> tuple[Transcript, list[str]]:
+    errors: list[str] = []
+    language_attempts: list[str | None] = [video.channel, None]
+    for attempt, language in enumerate(language_attempts, 1):
+        for retry_number in range(1, 4):
+            try:
+                transcript = fetch_transcript_once(video, language)
+                return transcript, errors
+            except Exception as exc:
+                errors.append(
+                    f"summynews(lang={language or 'auto'},attempt={attempt},retry={retry_number}):"
+                    f"{type(exc).__name__}:{clean(exc)}"
+                )
+                if retry_number < 3:
+                    time.sleep(2 ** (retry_number - 1))
+    return Transcript(), errors
+
+
+def collect_record(video: Video, metadata_map

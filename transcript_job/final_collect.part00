@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import csv
+import html
+import json
+import re
+import shutil
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+AS_OF = "2026-08-16"
+SUMMYNEWS_API = "https://www.summynews.com/api.php"
+SUMMYNEWS_PAGE = "https://www.summynews.com/"
+YOUTUBE_DATA_API = "https://www.googleapis.com/youtube/v3/videos"
+YTDATAVIEWER_PAGE = "https://www.ytdataviewer.com/"
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136 Safari/537.36"
+
+
+@dataclass(frozen=True)
+class Video:
+    channel: str
+    order: int
+    video_id: str
+    url: str
+    source_title: str = ""
+
+
+@dataclass
+class Segment:
+    start: float
+    duration: float
+    text: str
+
+
+@dataclass
+class Metadata:
+    title: str = ""
+    views: int | None = None
+    published: str = ""
+    source: str = ""
+
+
+@dataclass
+class Transcript:
+    language: str = ""
+    language_name: str = ""
+    auto_generated: bool | None = None
+    source: str = ""
+    segments: list[Segment] = field(default_factory=list)
+
+
+@dataclass
+class Record:
+    video: Video
+    metadata: Metadata
+    transcript: Transcript
+    errors: list[str] = field(default_factory=list)
+
+
+def session(total_retries: int = 4) -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=total_retries,
+        connect=total_retries,
+        read=total_retries,
+        status=total_retries,
+        backoff_factor=1.0,
+        status_forcelist=(408, 425, 429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=32, pool_maxsize=32)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    s.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    })
+    return s
+
+
+def clean(value: Any) -> str:
+    text = html.unescape(str(value or ""))
+    text = text.replace("\u200b", " ").replace("\ufeff", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_video_id(value: str) -> str | None:
+    value = clean(value)
+    if VIDEO_ID_RE.fullmatch(value):
+        return value
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return None
+    query_id = urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
+    if query_id and VIDEO_ID_RE.fullmatch(query_id):
+        return query_id
+    for part in reversed([x for x in parsed.path.split("/") if x]):
+        if VIDEO_ID_RE.fullmatch(part):
+            r

@@ -1,0 +1,62 @@
+rd_status(record) != "ok" for record in records),
+        "views_as_of": AS_OF,
+    }
+    (output / "stats.txt").write_text(
+        "\n".join(f"{key}: {value}" for key, value in stats.items()) + "\n",
+        encoding="utf-8",
+    )
+    shutil.copy2(__file__, output / "collect.py")
+    shutil.copy2(source_list, output / source_list.name)
+
+
+def validate_output(records: list[Record], expected_videos: list[Video], output: Path) -> None:
+    expected_ids = {video.video_id for video in expected_videos}
+    actual_ids = {record.video.video_id for record in records}
+    if actual_ids != expected_ids:
+        raise RuntimeError("Output video IDs do not match input")
+    if len(records) != len(expected_videos):
+        raise RuntimeError("Output record count does not match input")
+    failures = [record for record in records if record_status(record) != "ok"]
+    if failures:
+        ids = ",".join(record.video.video_id for record in failures)
+        raise RuntimeError(f"Incomplete records: {ids}")
+    ru_files = list((output / "ru").glob("*.txt"))
+    en_files = list((output / "en").glob("*.txt"))
+    expected_ru = sum(video.channel == "ru" for video in expected_videos)
+    expected_en = sum(video.channel == "en" for video in expected_videos)
+    if len(ru_files) != expected_ru or len(en_files) != expected_en:
+        raise RuntimeError("Output file count mismatch")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=Path("gleb_solomin_transcripts_2026-08-16"))
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--allow-incomplete", action="store_true")
+    args = parser.parse_args()
+
+    videos = read_xlsx(args.input) if args.input.suffix.lower() == ".xlsx" else read_tsv(args.input)
+    if len(videos) != 147:
+        raise ValueError(f"Expected 147 videos, got {len(videos)}")
+    if sum(video.channel == "ru" for video in videos) != 139:
+        raise ValueError("Expected 139 Russian-channel videos")
+    if sum(video.channel == "en" for video in videos) != 8:
+        raise ValueError("Expected 8 English-channel videos")
+
+    metadata_map = fetch_metadata(videos)
+    print(f"metadata: {len(metadata_map)}/{len(videos)}", flush=True)
+
+    records: list[Record] = []
+    with cf.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        futures = {pool.submit(collect_record, video, metadata_map): video for video in videos}
+        for completed, future in enumerate(cf.as_completed(futures), 1):
+            video = futures[future]
+            try:
+                record = future.result()
+            except Exception as exc:
+                record = Record(
+                    video=video,
+                    metadata=metadata_map.get(video.video_id, Metadata(title=video.source_title)),
+                    transcript=Transcript(),
+                    errors=[f"fatal:{type(exc).__name__}:{clean(exc

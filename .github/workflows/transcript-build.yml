@@ -30,7 +30,9 @@ jobs:
 
       - name: assemble
         run: |
-          base64 -d transcript_job/final_collect.py.gz.b64 | gzip -d > transcript_job/final_collect.py
+          cat transcript_job/final_collect.part* > transcript_job/final_collect.py
+          test "$(wc -c < transcript_job/final_collect.py)" = "21610"
+          test "$(git hash-object transcript_job/final_collect.py)" = "89f4929ccadec8bb082689cf5c03bb944fb64a81"
           python -m py_compile transcript_job/final_collect.py
 
       - name: install
